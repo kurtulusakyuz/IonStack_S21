@@ -65,7 +65,7 @@ Root (if achieved) lives only until reboot; nothing is flashed.
   rt_mutex_adjust_prio_chain → _raw_spin_trylock` NULL fault) without ever
   landing the stamp: the 8-byte `lock` field sits in a copy-gap no surveyed
   blocking syscall covers (disasm-verified per-syscall depth map in
-  MEMORY.md). Pipe-reclaim gate systematically misses (`0/0`).
+  RESEARCH.md). Pipe-reclaim gate systematically misses (`0/0`).
 - Timing-sensitive; expect kernel panics. Reboot for clean slabs, keep the
   device idle while running. `/data/local/tmp` is wiped on reboot — repush
   binaries after every boot.
