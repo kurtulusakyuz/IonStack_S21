@@ -1,4 +1,4 @@
-# IonStack_S21 MEMORY — o1s/G991B (5.4.242) research notes
+# IonStack_S21 RESEARCH — o1s/G991B (5.4.242) research notes
 
 Condensed from the full campaign (`Root-My-Galaxy-Payloads/docs/
 SM-G991B-G991BXXSJHZC2.md`). vmlinux: `firmware/G991BXXSJHZC2/vmlinux.elf`.
