@@ -1,0 +1,9 @@
+IonStack_S21 incorporates exploit code originally published in
+NebuSec/CyberMeowfia (IonStack/CVE-2026-43499/exploit) and
+BuSung-dev/CVE-2026-43499-S25U, with thanks to F-19-F/IonStackQuest3.
+
+The upstream Apache License 2.0 is retained in LICENSE.
+o1s target profile, research notes and tooling additions in this
+repository are provided under the same license.
+
+Use only on devices you own or are explicitly authorized to test.
