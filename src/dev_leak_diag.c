@@ -1,0 +1,102 @@
+/* dev_leak_diag: dump first 30 raw sample IPs (task-attributed) during
+ * stat loop. Matches against vmlinux under slide hypotheses. */
+#include <errno.h>
+#include <linux/perf_event.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#ifndef SYS_perf_event_open
+#define SYS_perf_event_open 241
+#endif
+#define PERF_EVENT_IOC_ENABLE _IO('$', 0)
+#define PERF_EVENT_IOC_DISABLE _IO('$', 1)
+
+static uint64_t ring_u64(const uint8_t *ring, uint64_t size, uint64_t pos)
+{
+    uint64_t v, off = pos & (size - 1);
+    if (off + 8 <= size)
+        memcpy(&v, ring + off, 8);
+    else {
+        uint8_t b[8];
+        uint64_t first = size - off;
+        memcpy(b, ring + off, first);
+        memcpy(b + first, ring, 8 - first);
+        memcpy(&v, b, 8);
+    }
+    return v;
+}
+
+int main(void)
+{
+    struct perf_event_attr a;
+    struct stat st;
+    setvbuf(stdout, NULL, _IONBF, 0);
+    alarm(60);
+    printf("dev_leak_diag: raw IP dump\n");
+    memset(&a, 0, sizeof(a));
+    a.type = PERF_TYPE_SOFTWARE;
+    a.size = sizeof(a);
+    a.config = PERF_COUNT_SW_CPU_CLOCK;
+    a.sample_period = 1000;
+    a.sample_type = PERF_SAMPLE_IP | PERF_SAMPLE_TID | PERF_SAMPLE_CALLCHAIN |
+                    PERF_SAMPLE_REGS_INTR;
+    a.sample_regs_intr = (1ULL << 33) - 1;
+    a.sample_max_stack = 16;
+    a.disabled = 1;
+    a.exclude_user = 0;
+    a.exclude_hv = 1;
+    pid_t me = syscall(SYS_gettid);
+    int fd = syscall(SYS_perf_event_open, &a, me, -1, -1, 0);
+    printf("open fd=%d errno=%d\n", fd, errno);
+    if (fd < 0)
+        return 2;
+    long ps = sysconf(_SC_PAGESIZE);
+    size_t msz = (size_t)ps * 129;
+    struct perf_event_mmap_page *m =
+        mmap(NULL, msz, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (m == MAP_FAILED)
+        return 2;
+    ioctl(fd, PERF_EVENT_IOC_RESET, 0);
+    ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
+    volatile unsigned long acc = 0;
+    for (int i = 0; i < 300000000; i++)
+        acc += (unsigned long)i;
+    (void)acc;
+    (void)st;
+    ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);
+    __sync_synchronize();
+    uint8_t *ring = (uint8_t *)m + m->data_offset;
+    uint64_t size = m->data_size, tail = m->data_tail, head = m->data_head;
+    unsigned shown = 0;
+    while (tail + 16 <= head && shown < 30) {
+        uint8_t hb[16];
+        uint64_t off = tail & (size - 1);
+        if (off + 16 <= size)
+            memcpy(hb, ring + off, 16);
+        else {
+            size_t first = size - off;
+            memcpy(hb, ring + off, first);
+            memcpy(hb + first, ring, 16 - first);
+        }
+        uint32_t type;
+        uint16_t bsz;
+        memcpy(&type, hb, 4);
+        memcpy(&bsz, hb + 6, 2);
+        if (bsz < 16 || tail + bsz > head)
+            break;
+        if (type == PERF_RECORD_SAMPLE) {
+            uint64_t pos = tail + 8, ip = ring_u64(ring, size, pos);
+            printf("ip=%#llx\n", (unsigned long long)ip);
+            shown++;
+        }
+        tail += bsz;
+    }
+    munmap(m, msz);
+    close(fd);
+    return 0;
+}
