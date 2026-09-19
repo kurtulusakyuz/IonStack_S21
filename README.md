@@ -53,9 +53,9 @@ firmware config (`USER_NS`, `RDS`, `CRYPTO_USER_API_AEAD` all unset;
 MFC double-free unreachable with `MFC_USE_DMABUF_CONTAINER=n`;
 AF_ALG/eBPF gated for shell). The remaining open fronts live outside
 this repo's scope: Mali-G78 r38 recon (`/dev/mali0` is shell-openable),
-oempocalypse-P2 watch, and the final report. Post-write artifacts
+oempocalypse-P2 watch. Post-write artifacts
 (KernelSU `.ko` + `ksud` built for this exact firmware) are staged
-separately by the owner; the `src/kernelsnitch/` headers in this tree
+separately; the `src/kernelsnitch/` headers in this tree
 remain staged but unbuilt (no consumer exists without a write).
 
 This repo is kept as the complete, self-contained record of the o1s
