@@ -165,6 +165,13 @@ path is impossible: geometry, not probability.**
   early-bail + D-state sleep. No win.
 - EXIT=142 lesson adopted: oracles are Oops-VA / ret / dumps only, never
   exit codes.
+- Oppo second-requeue consumer (Scheme-A shape: T2 plain-waits, main
+  CMP_REQUEUE_PI into CHAIN instead of `sched_setattr`): TESTED ON DEVICE
+  2026-09-19 (`src/schemea.c`) — CMP#1 EDEADLK, CMP#2 `ret=0`, no Oops,
+  device alive. The walk reaches the stale slot and exits cleanly ([4]
+  mismatch), exactly as disasm predicted. Consumer-variant coverage is
+  now complete (`sched_setattr` faults/spins, LOCK_PI M-walk spins/bails,
+  requeue walks clean) — same wall from all three sides.
 - Reference: <https://github.com/huaguiqi/asus-i005-cve-2026-43499>
   (5.4.210-qgki arm64, shell; same 3-thread trigger shape; hit the wall
   independently).

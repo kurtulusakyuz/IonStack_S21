@@ -1,5 +1,9 @@
 # IonStack_S21 — CVE-2026-43499 research for Galaxy S21 (SM-G991B)
 
+> Working, active KernelSU project for this device:
+> **[kurtulusakyuz/dfroot-s21](https://github.com/kurtulusakyuz/dfroot-s21)**
+> — start there. This repo keeps the IonStack research only.
+
 Device-specific IonStack payload for the Samsung Galaxy S21 (o1s) on
 firmware `G991BXXSJHZC2`. **Status: research CLOSED — deterministic
 DoS-only; the kernel write path is proven impossible on this build.
