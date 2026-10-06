@@ -34,7 +34,7 @@ not paused. What was proven, in order:
    `current->pi_blocked_on` instead of `waiter->task->pi_blocked_on`,
    so a `FUTEX_CMP_REQUEUE_PI` rollback leaves a dangling pointer to a
    stack `rt_waiter`. Upstream fix `3bfdc63` is absent from 5.4.242.
-2. **The trigger is 100% reliable.** The 3-thread cycle (owner →
+2. **The trigger is reliable.** The 3-thread cycle (owner →
    chain → waiter → target deadlock, main CMP fails EDEADLK) plus a
    consumer `sched_setattr` reproduces a device-identical Oops
    (`rt_mutex_adjust_prio_chain+0x108` → `_raw_spin_trylock+0x1c`,
@@ -55,17 +55,10 @@ not paused. What was proven, in order:
 Related 2026 kernel LPE avenues were also closed on this build by
 firmware config (`USER_NS`, `RDS`, `CRYPTO_USER_API_AEAD` all unset;
 MFC double-free unreachable with `MFC_USE_DMABUF_CONTAINER=n`;
-AF_ALG/eBPF gated for shell). The remaining open fronts live outside
-this repo's scope: Mali-G78 r38 recon (`/dev/mali0` is shell-openable),
-oempocalypse-P2 watch. Post-write artifacts
+AF_ALG/eBPF gated for shell). Post-write artifacts
 (KernelSU `.ko` + `ksud` built for this exact firmware) are staged
 separately; the `src/kernelsnitch/` headers in this tree
 remain staged but unbuilt (no consumer exists without a write).
-
-This repo is kept as the complete, self-contained record of the o1s
-GhostLock campaign: source, target profile, geometry notes, and
-verdicts. Binaries built from it are reproducers and oracles
-(Oops-VA / return-code / dump based), not root exploits.
 
 ## Layout
 
@@ -115,6 +108,4 @@ future write primitive, lives only until reboot; nothing is flashed.
 - Timing-sensitive; expect kernel panics. Reboot for clean slabs, keep the
   device idle while running. `/data/local/tmp` is wiped on reboot — repush
   binaries after every boot.
-- Never pipe compiler output to `head` (use a file + return code), and
-  always `md5sum` host vs device after push — see RESEARCH.md §9.
 - Use only on devices you own or are explicitly authorized to test.
